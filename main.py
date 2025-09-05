@@ -26,12 +26,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-# Global state
-app = FastAPI()
-app.state.client = None
-app.state.product_ids = []  # Approved premium products UUIDs
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -50,8 +44,8 @@ async def lifespan(app: FastAPI):
         )
 
         # Fetch approved products
-        access_products = await app.state.client.get("/products/request-access/")
-        all_products = await app.state.client.get("/products/")
+        access_products = app.state.client.get("/products/request-access/")
+        all_products = app.state.client.get("/products/")
         product_map = {p["id"]: p for p in all_products}
 
         # Filter approved premium products
@@ -84,9 +78,9 @@ async def lifespan(app: FastAPI):
         await close_db()
         logger.info("🛑 Resources closed")
 
-
 app = FastAPI(lifespan=lifespan)
-
+app.state.client = None
+app.state.product_ids = []
 
 
 async def get_approved_products():
@@ -98,27 +92,40 @@ async def get_approved_products():
         return [p for p in products if p["status"] == "approved"]
 
 
-
 async def insert_product_questionnaire(product_id: UUID, product_name: str):
     """
-    Fetch questionnaire for a product and insert its controls into DB.
+    Fetches questionnaire controls for a product and inserts them into the database.
+    Invalid UUIDs are skipped with a warning.
     """
-    product_data = await app.state.client.get(f"/products/{product_id}/")
-    if not product_data or not product_data.get("questionnaire"):
-        return  # No controls
+    try:
+        # Fetch controls from API
+        controls = app.state.client.get(f"/products/{product_id}/questionnaire/")
+        print(controls)
+        for control in controls:
+            control_id_raw = control.get("id")
+            text = control.get("text", "")
+            metadata = control.get("metadata", {})
 
-    sections = product_data["questionnaire"]
-    for section in sections:
-        children = section.get("children", [])
-        for item in children:
-            control_id = item["id"]
-            text = item.get("question", "")
-            metadata = {
-                "type": item.get("type"),
-                "description": item.get("description"),
-                "section": section.get("question"),
-            }
-            await insert_control(control_id=UUID(control_id), product_id=product_id, text=text, metadata=metadata)
+            # Safely convert control_id to UUID
+            try:
+                control_uuid = UUID(control_id_raw)
+            except (ValueError, TypeError):
+                logger.warning(f"Skipping invalid control ID for product {product_name}: {control_id_raw}")
+                continue
+
+            # Insert control
+            await insert_control(
+                control_id=control_uuid,
+                product_id=product_id,
+                text=text,
+                metadata=metadata
+            )
+
+        logger.info(f"✅ Inserted questionnaire for product: {product_name}")
+
+    except Exception as e:
+        logger.error(f"Failed to insert questionnaire for product {product_name}: {e}")
+
 
 
 

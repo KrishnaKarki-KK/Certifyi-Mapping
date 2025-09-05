@@ -1,8 +1,9 @@
 import logging
 from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
-import os
+import json
 from dotenv import load_dotenv
+import os
 
 
 load_dotenv()
@@ -86,14 +87,18 @@ async def close_db():
 
 
 
-async def insert_product(product_id: UUID, name: str, metadata: dict = None):
+async def insert_product(product_id: str, name: str, metadata: dict = None):
+    metadata = metadata or {}
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("""
+            await cur.execute(
+                """
                 INSERT INTO products (id, name, metadata)
                 VALUES (%s, %s, %s)
-                ON CONFLICT (id) DO NOTHING;
-            """, (product_id, name, metadata or {}))
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (product_id, name, json.dumps(metadata))  # <-- convert dict to JSON string
+            )
         await conn.commit()
 
 
