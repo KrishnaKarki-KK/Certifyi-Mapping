@@ -139,14 +139,49 @@ async def insert_mapping(source_id: UUID, target_id: UUID, confidence: float):
         await conn.commit()
 
 
-async def get_mappings(source_id: UUID):
+async def get_mappings(product_id: str, pool: AsyncConnectionPool):
+    """
+    Fetch mappings for a specific product ID.
+    Returns list of {source_control_id, target_control_id, confidence}.
+    """
+    query = """
+        SELECT source_control_id, target_control_id, confidence
+        FROM mappings
+        WHERE source_control_id IN (
+            SELECT id FROM controls WHERE product_id = %s
+        )
+    """
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("""
-                SELECT target_control_id, confidence
-                FROM mappings
-                WHERE source_control_id = %s
-                ORDER BY confidence DESC;
-            """, (source_id,))
+            await cur.execute(query, (product_id,))
             rows = await cur.fetchall()
-    return [{"target_id": r[0], "score": r[1]} for r in rows]
+
+    return [
+        {
+            "source_control_id": str(r[0]),
+            "target_control_id": str(r[1]),
+            "confidence": float(r[2])
+        }
+        for r in rows
+    ]
+
+async def get_control_product(control_id: str) -> str | None:
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT product_id FROM controls WHERE id = %s;",
+                (control_id,)
+            )
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+
+async def get_control_text(control_id: str) -> str | None:
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT text FROM controls WHERE id = %s;",
+                (control_id,)
+            )
+            row = await cur.fetchone()
+            return row[0] if row else None

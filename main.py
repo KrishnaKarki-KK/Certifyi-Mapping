@@ -1,8 +1,10 @@
 import logging
 from uuid import UUID
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from contextlib import asynccontextmanager
+from psycopg_pool import AsyncConnectionPool
 import os
+import httpx
 
 from db_config import (
     init_db,
@@ -12,7 +14,9 @@ from db_config import (
     get_products,
     get_mappings,
     get_connection,
-    get_controls
+    get_controls,
+    get_control_product,
+    get_control_text
     )
 
 from mapping import map_all_products, map_two_products
@@ -85,6 +89,16 @@ app = FastAPI(lifespan=lifespan)
 
 
 
+async def get_approved_products():
+    """Fetch products with approved access from external API."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{os.getenv("BASE_URL")}/products/request-access")
+        resp.raise_for_status()
+        products = resp.json()
+        return [p for p in products if p["status"] == "approved"]
+
+
+
 async def insert_product_questionnaire(product_id: UUID, product_name: str):
     """
     Fetch questionnaire for a product and insert its controls into DB.
@@ -108,21 +122,34 @@ async def insert_product_questionnaire(product_id: UUID, product_name: str):
 
 
 
+
 @app.get("/percentage/")
-async def get_percentage():
+async def get_percentage(pool: AsyncConnectionPool = Depends()):
     """
-    Returns mapping percentage for all approved premium products.
+    Returns mapping percentages for approved products only.
     """
+    approved_products = await get_approved_products()
     result = {}
-    for pid in app.state.product_ids:
-        mappings = await get_mappings(pid)
-        total_controls = len(await get_controls(pid))
+
+    for prod in approved_products:
+        pid = prod["product_id"]
+
+        # Fetch total controls for this product
+        controls = await get_controls(pid, pool=pool)
+        total_controls = len(controls)
+
         if total_controls == 0:
-            result[str(pid)] = 0
-        else:
-            mapped_count = len(mappings)
-            result[str(pid)] = round(mapped_count / total_controls * 100, 2)
-    return result
+            result[pid] = 0.0
+            continue
+
+        # Fetch how many of its controls are mapped
+        mappings = await get_mappings(pid, pool=pool)
+        mapped_count = len(mappings)
+
+        percentage = (mapped_count / total_controls) * 100 if total_controls > 0 else 0
+        result[pid] = round(percentage, 2)
+
+    return {"approved_products": result}
 
 
 @app.post("/remap/{product_id}")
@@ -138,14 +165,29 @@ async def remap_product(product_id: str):
     return {"status": "success", "message": f"Product {product_id} remapped"}
 
 
-@app.get("/get_sync/")
-async def get_sync():
+
+@app.get("/get_sync/{control_id}")
+async def get_sync(control_id: str):
     """
-    Returns all mappings for sync retrieval.
+    Given a control ID, return all mapped controls from approved products.
     """
-    from db_config import get_mappings  # reuse function
-    result = {}
-    for pid in app.state.product_ids:
-        mappings = await get_mappings(pid)
-        result[str(pid)] = mappings
-    return result
+    approved_products = await get_approved_products()
+    approved_set = set(approved_products)
+
+    mappings = await get_mappings(control_id)
+
+    filtered_mappings = []
+    for m in mappings:
+        target_product_id = await get_control_product(m["target_id"])
+        if target_product_id in approved_set:
+            filtered_mappings.append({
+                "target_control_id": m["target_id"],
+                "target_control_text": await get_control_text(m["target_id"]),
+                "confidence": m["score"],
+                "product_id": target_product_id,
+            })
+
+    return {
+        "source_control_id": control_id,
+        "mappings": filtered_mappings
+    }
