@@ -134,14 +134,20 @@ async def get_controls(product_id: UUID):
 
 
 async def insert_mapping(source_id: UUID, target_id: UUID, confidence: float):
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("""
-                INSERT INTO mappings (source_control_id, target_control_id, confidence)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (source_control_id, target_control_id) DO NOTHING;
-            """, (source_id, target_id, confidence))
-        await conn.commit()
+    """
+    Insert or update a mapping in a safe, idempotent way.
+    Prevents duplicate rows by using UPSERT.
+    """
+    query = """
+    INSERT INTO control_mappings (source_id, target_id, confidence)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (source_id, target_id)
+    DO UPDATE SET confidence = EXCLUDED.confidence,
+                  mapped_at = now();
+    """
+    conn = await get_connection()
+    async with conn.transaction():  # ensures atomicity
+        await conn.execute(query, source_id, target_id, confidence)
 
 
 async def get_mappings(product_id: str, pool: AsyncConnectionPool):

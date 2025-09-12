@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import json
 from typing import Dict, List
 from uuid import UUID
@@ -10,6 +11,21 @@ logging.basicConfig(level=logging.INFO)
 
 # Initialize OpenAI client
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def extract_json_from_text(text: str):
+    """
+    Extract the first JSON array or object from text using regex.
+    Returns parsed Python object or None.
+    """
+    pattern = r'(\[.*?\]|\{.*\})'
+    match = re.search(pattern, text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
 
 
 async def map_product_controls_with_llm(product_a: Dict, product_b: Dict) -> List[Dict]:
@@ -72,22 +88,21 @@ Output example:
         raw_output = response.choices[0].message.content.strip()
         logger.debug(f"LLM raw output: {raw_output}")
 
-        # Parse JSON output
-        try:
-            mappings = json.loads(raw_output)
-            db_mappings = []
-
-            for m in mappings:
-                if "source_id" in m and "target_id" in m:
-                    db_mappings.append({
-                        "source_id": m["source_id"],
-                        "target_id": m["target_id"],
-                        "confidence": float(m.get("confidence", 0.0)),
-                    })
-            return db_mappings
-        except Exception:
+        # Parse JSON output (patched with regex extractor)
+        mappings = extract_json_from_text(raw_output)
+        if not mappings:
             logger.warning(f"Failed to parse LLM JSON output: {raw_output}")
             return []
+
+        db_mappings = []
+        for m in mappings:
+            if "source_id" in m and "target_id" in m:
+                db_mappings.append({
+                    "source_id": m["source_id"],
+                    "target_id": m["target_id"],
+                    "confidence": float(m.get("confidence", 0.0)),
+                })
+        return db_mappings
 
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
